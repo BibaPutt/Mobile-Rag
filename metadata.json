@@ -1,0 +1,8 @@
+{
+  "name": "Remix: inbuilt: MediAgent",
+  "description": "An advanced clinical consultation assistant that transcribes doctor-patient conversations, processes medical documents, and generates evidence-based treatment suggestions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
