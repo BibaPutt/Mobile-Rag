@@ -444,7 +444,7 @@ An advanced feature of MediAgent is its ability to ground structured text recomm
 
 When recommendations include therapeutic guidelines referencing Meridian and Acupuncture points, the extraction pipeline isolates and maps targets using an intensive regex parser. It recognizes standard alphanumeric clinical nomenclature across all major meridians (e.g., LU-9, GV-20, ST-36):
 
-$$\text{Regex} = \text{\texttt{\textbackslash b(LU|LI|ST|SP|HT|SI|BL|KI|KID|PC|TE|SJ|GB|LR|LIV|CV|GV|DU|RN)\textbackslash s*[-\_]?\textbackslash s*([1-9]\textbackslash d?)\textbackslash b}}$$
+$$\text{Regex} = \mathtt{\backslash b(LU|LI|ST|SP|HT|SI|BL|KI|KID|PC|TE|SJ|GB|LR|LIV|CV|GV|DU|RN)\backslash s*[-\_]\?\backslash s*([1-9]\backslash d?)\backslash b}$$
 
 Matches are normalized to a consistent clinical format (e.g., `"LIV-3"` maps to `"LR-3"`, `"KID-1"` to `"KI-1"`) using standard lookups:
 ```kotlin
