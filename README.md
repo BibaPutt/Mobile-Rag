@@ -66,6 +66,13 @@ This document provides an exhaustive, highly technical deep dive into the archit
 5. [Clinical Inference, Prompts & Safety Guardrails](#5-clinical-inference-prompts--safety-guardrails)
 6. [Multi-Provider Fallback Architecture](#6-multi-provider-fallback-architecture)
 7. [Asynchronous Lifecycles & OS Power Management](#7-asynchronous-lifecycles--os-power-management)
+8. [Server Architecture & API](#8-server-architecture--api)
+9. [Session Finite State Machine](#9-session-finite-state-machine)
+10. [UI Screen Overview](#10-ui-screen-overview)
+11. [WebSocket Sync Protocol](#11-websocket-sync-protocol)
+12. [Build System & Dependencies](#12-build-system--dependencies)
+13. [Development Setup](#13-development-setup)
+14. [Security Considerations](#14-security-considerations)
 
 ---
 
@@ -444,7 +451,7 @@ An advanced feature of MediAgent is its ability to ground structured text recomm
 
 When recommendations include therapeutic guidelines referencing Meridian and Acupuncture points, the extraction pipeline isolates and maps targets using an intensive regex parser. It recognizes standard alphanumeric clinical nomenclature across all major meridians (e.g., LU-9, GV-20, ST-36):
 
-$$\text{Regex} = \mathtt{\backslash b(LU|LI|ST|SP|HT|SI|BL|KI|KID|PC|TE|SJ|GB|LR|LIV|CV|GV|DU|RN)\backslash s*[-\_]\?\backslash s*([1-9]\backslash d?)\backslash b}$$
+$$\text{Regex} = \mathtt{\backslash b(LU|LI|ST|SP|HT|SI|BL|KI|KID|PC|TE|SJ|GB|LR|LIV|CV|GV|DU|RN)\backslash s*[-\_]?\backslash s*([1-9]\backslash d?)\backslash b}$$
 
 Matches are normalized to a consistent clinical format (e.g., `"LIV-3"` maps to `"LR-3"`, `"KID-1"` to `"KI-1"`) using standard lookups:
 ```kotlin
@@ -556,4 +563,319 @@ private fun getUnifiedRemainingSeconds(): Int {
 }
 ```
 This is formatted dynamically and published to the active `NotificationCompat.Builder` progress bar. This provides clinicians with reliable feedback for long-running manual uploads.
+
+---
+
+## 8. Server Architecture & API
+
+MediAgent ships with a companion Node.js backend (`server/`) for multi-user sync, authentication, and remote LLM orchestration.
+
+### 8.1 Technology Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| Runtime | Node.js (Express) |
+| Auth | JWT (`jsonwebtoken`) |
+| Database | PostgreSQL (via `pg`) |
+| Real-time | WebSocket (`ws`) |
+| File Upload | `multer` |
+
+### 8.2 Deployment Architecture
+
+```
+         ┌──────────────┐         ┌──────────────┐
+         │  MediAgent   │  HTTPS  │   Express    │
+         │  Android App │◄───────►│   Server     │
+         │              │  REST   │   (:4000)    │
+         └──────────────┘         └──────┬───────┘
+                │                        │
+         ┌──────┴──────┐         ┌──────┴───────┐
+         │  Local DB   │         │  PostgreSQL  │
+         │  (Room)     │         │  (Render)    │
+         └─────────────┘         └──────────────┘
+```
+
+### 8.3 Mock Mode
+
+If `DATABASE_URL` is not set, the server runs in **mock mode** with in-memory JS objects. This enables frontend development and testing without requiring PostgreSQL.
+
+### 8.4 REST API Endpoints
+
+| Method | Path | Description | Auth |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/auth/login` | Authenticate doctor, return JWT | — |
+| `POST` | `/auth/register` | Register new doctor account | — |
+| `GET` | `/patients` | List patients for authenticated doctor | JWT |
+| `POST` | `/patients` | Add new patient | JWT |
+| `GET` | `/patients/:id/documents` | List documents for a patient | JWT |
+| `POST` | `/sessions` | Create or update session | JWT |
+| `POST` | `/sessions/turn` | Add a session turn | JWT |
+| `POST` | `/sync` | Full data sync payload | JWT |
+
+### 8.5 PostgreSQL Schema (`server/schema.sql`)
+
+```
+┌──────────────┐       ┌──────────────┐
+│   clinics    │       │   doctors    │
+├──────────────┤       ├──────────────┤
+│ id (PK)      │◄──────│ id (PK)      │
+│ name         │   * 1│ clinic_id(FK)│
+│ code         │       │ name         │
+└──────────────┘       │ email        │
+                       │ password_hash│
+┌──────────────┐       │ model_prov   │
+│   patients   │       │ model_name   │
+├──────────────┤       └──────┬───────┘
+│ id (PK)      │              │
+│ doctor_id(FK)│◄─────────────┘
+│ name (encr.) │       ┌──────────────┐
+│ ... (PII)    │       │   sessions   │
+└──────┬───────┘       ├──────────────┤
+       │              │ id (PK)      │
+┌──────┴───────┐       │ patient_id(FK)│
+│  documents   │       │ doctor_id(FK)│
+├──────────────┤       │ status       │
+│ id (PK)      │       └──────┬───────┘
+│ patient_id   │              │
+│ file_name    │       ┌──────┴───────┐
+│ s3_key       │       │session_turns│
+└──────┬───────┘       ├──────────────┤
+       │              │ id (PK)      │
+┌──────┴───────┐       │ session_id   │
+│ doc_summaries│       │ speaker      │
+├──────────────┤       │ content      │
+│ id (PK)      │       │ timestamp    │
+│ document_id  │       └──────────────┘
+│ summary      │
+│ embedding    │
+└──────────────┘
+```
+
+- PII columns use `pgcrypto` for encryption at rest.
+- `sessions.status` tracks lifecycle (`active`, `completed`, `cancelled`).
+
+### 8.6 LLM Integration Matrix (Server)
+
+| Provider | Endpoint | Models |
+| :--- | :--- | :--- |
+| **OpenRouter** | `https://openrouter.ai/api/v1/chat/completions` | Configurable per doctor |
+| **Google Gemini** | Firebase Vertex AI SDK | Configurable per doctor |
+
+The server system prompt (`server/systemPrompt.js`, ~10K chars) enforces strict JSON schema output with fields: `solutions` (array of `{title, description, evidence, category, confidence, guidelines}`), `session_notes`, `suggested_tests`, `followup_date`, `icd_code`, `category_groups`. RAG context is injected as `<retrieved_chunks>` before the prompt body.
+
+---
+
+## 9. Session Finite State Machine
+
+The `MediAgentViewModel` implements a deterministic FSM governing consultation recording lifecycle:
+
+```
+          ┌─────────────────────────────────────────┐
+          │            IDLE ─────► LISTENING        │
+          │              ▲            │              │
+          │              │            ▼              │
+          │              │        PROCESSING         │
+          │              │            │              │
+          │              │            ▼              │
+          │              │         RESULT            │
+          │              │            │              │
+          │              └────────────┘              │
+          │         (restart / new session)          │
+          └─────────────────────────────────────────┘
+```
+
+### State Transitions
+
+| From | To | Trigger |
+| :--- | :--- | :--- |
+| `IDLE` | `LISTENING` | User taps "Start Recording" |
+| `LISTENING` | `PROCESSING` | Speech recognition completes, transcription ready |
+| `PROCESSING` | `RESULT` | LLM inference returns structured clinical output |
+| `RESULT` | `IDLE` | User starts a new session or reviews |
+
+- **IDLE**: No active session. UI shows start/patient selection.
+- **LISTENING**: `SpeechRecognizer` active, audio stream buffered, turn markers recorded.
+- **PROCESSING**: Transcription complete → RAG retrieval → LLM inference run. UI shows loading state with progress.
+- **RESULT**: Structured recommendations displayed. User can review, save, or discard.
+
+Error states transition back to `IDLE` with a descriptive error message.
+
+---
+
+## 10. UI Screen Overview
+
+| Screen | Route | Purpose |
+| :--- | :--- | :--- |
+| **LoginScreen** | `login` | QR code scan (server login via session code) + manual server URL entry |
+| **PatientListScreen** | `patients` | List all patients, search/filter, FAB to add new patient |
+| **PatientDetailScreen** | `patient/{id}` | View patient history, chronic conditions, past sessions |
+| **ActiveSessionScreen** | `session/{patientId}` | Record consultation, view live transcription, RAG-powered suggestions |
+| **PastSessionReviewScreen** | `past-session` | Browse historical sessions, review LLM outputs |
+| **DocumentsManagerScreen** | `documents` | Upload PDFs, view indexed documents, trigger re-indexing |
+| **SettingsScreen** | `settings` | Server URL, model selection, auth token status, logout |
+
+All screens observe ViewModel state via `StateFlow` and recompose reactively. Navigation is managed via Jetpack Navigation Compose.
+
+---
+
+## 11. WebSocket Sync Protocol
+
+The client-server sync channel uses a WebSocket connection (established after JWT login) to synchronize consultation sessions in real time.
+
+### Connection Lifecycle
+
+1. Client connects to `ws://<server>:4000`
+2. Server validates JWT from query parameter or first message
+3. Bidirectional message exchange begins
+4. Reconnection with exponential backoff on disconnect
+
+### Message Types
+
+| Type | Direction | Payload |
+| :--- | :--- | :--- |
+| `session_sync` | Client → Server | Full session object with turns |
+| `session_ack` | Server → Client | `{ sessionId, status, serverTimestamp }` |
+| `transcript_delta` | Client → Server | Partial transcript update during recording |
+| `sync_complete` | Server → Client | Confirmation of full sync convergence |
+| `error` | Server → Client | `{ code, message }` |
+
+### Sync Strategy
+
+- **Last-write-wins** for session metadata.
+- **Append-only** for session turns (turns are never deleted).
+- Full state sync on reconnect (client sends its latest `session.updatedAt`, server responds with delta).
+
+---
+
+## 12. Build System & Dependencies
+
+### 12.1 Project Configuration
+
+| Setting | Value |
+| :--- | :--- |
+| Package | `com.example` (placeholder) |
+| compileSdk | 36 (Android 15) |
+| minSdk | 24 (Android 7.0) |
+| Kotlin | 2.2.10 |
+| AGP | 9.1.1 |
+| Compose BOM | 2024.09.00 |
+| Gradle | Config cache enabled, workers.max=4 |
+
+### 12.2 Key Dependencies (Version Catalog)
+
+| Category | Libraries |
+| :--- | :--- |
+| **UI** | Jetpack Compose, Navigation Compose, Material3, Coil, Accompanist Permissions |
+| **Data** | Room, DataStore Preferences, Retrofit + Moshi, OkHttp |
+| **AI/ML** | ML Kit Text Recognition, Firebase Vertex AI |
+| **Media** | CameraX, Google Speech Recognizer |
+| **Testing** | Roborazzi, Robolectric, JUnit 4 |
+| **Build** | Secrets Gradle Plugin (reads `GEMINI_API_KEY` from `local.properties`) |
+
+### 12.3 Server Dependencies
+
+| Package | Purpose |
+| :--- | :--- |
+| `express` | HTTP framework |
+| `pg` | PostgreSQL client |
+| `ws` | WebSocket server |
+| `jsonwebtoken` | JWT auth |
+| `multer` | File upload handling |
+| `dotenv` | Environment configuration |
+| `cors` | Cross-origin requests |
+
+---
+
+## 13. Development Setup
+
+### 13.1 Android App
+
+**Prerequisites:**
+- Android Studio Ladybug or later
+- JDK 17+
+- Android SDK 36
+
+**Setup:**
+```bash
+# 1. Clone and open in Android Studio
+git clone <repo-url>
+cd mediagent
+
+# 2. Create local.properties with Gemini API key
+echo "GEMINI_API_KEY=your_key_here" > local.properties
+
+# 3. Build and run
+./gradlew :app:assembleDebug
+```
+
+**Environment Variables (`local.properties`):**
+| Key | Required | Description |
+| :--- | :--- | :--- |
+| `GEMINI_API_KEY` | Yes | Google Gemini API key (exposed via `BuildConfig.GEMINI_API_KEY`) |
+
+### 13.2 Server
+
+**Prerequisites:**
+- Node.js 18+
+- PostgreSQL (optional — mock mode works without it)
+
+**Setup:**
+```bash
+cd server
+cp .env.example .env
+npm install
+node server.js
+```
+
+**Environment Variables (`.env`):**
+| Key | Required | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `DATABASE_URL` | No | — | PostgreSQL connection string (omit for mock mode) |
+| `JWT_SECRET` | No | `"your-secret-key"` | JWT signing secret |
+| `PORT` | No | `4000` | Server port |
+| `OPENROUTER_API_KEY` | No | — | OpenRouter LLM provider key |
+| `GEMINI_API_KEY` | No | — | Server-side Gemini key |
+
+### 13.3 Testing
+
+```bash
+# Unit tests (Android)
+./gradlew :app:testDebugUnitTest
+
+# Robolectric (instrumented on JVM)
+./gradlew :app:testDebugUnitTest
+
+# Screenshot tests (Roborazzi)
+./gradlew :app:verifyRoborazziDebug
+```
+
+---
+
+## 14. Security Considerations
+
+### Current Posture
+
+| Area | Status | Risk |
+| :--- | :--- | :--- |
+| **Package name** | `com.example` (placeholder) | Must change for Play Store |
+| **JWT secret** | Hardcoded `"your-secret-key"` in `server.js` | CRITICAL — change for production |
+| **Signing** | Debug keystore; `my-upload-key.jks` placeholder | Must configure release signing |
+| **Local PII** | Plaintext in Room DB (local device only) | Low — device-local only |
+| **Server PII** | Encrypted via `pgcrypto` | Acceptable |
+| **Certificate pinning** | Not implemented | Medium — MITM risk |
+| **Network** | HTTP (no TLS configured) | Medium — use reverse proxy (nginx/Caddy) |
+| **API key** | `GEMINI_API_KEY` in `BuildConfig` | Low — compile-time constant |
+| **Auth** | JWT without refresh tokens | Medium — token rotation needed |
+
+### Hardening Checklist
+
+- [ ] Change package name from `com.example`
+- [ ] Set a strong `JWT_SECRET` environment variable
+- [ ] Configure release signing with a real keystore
+- [ ] Add TLS termination (Cloudflare, nginx, or Caddy)
+- [ ] Implement certificate pinning (OkHttp `CertificatePinner`)
+- [ ] Add token refresh mechanism (short-lived access + long-lived refresh)
+- [ ] Add Rate limiting on auth endpoints
+- [ ] Add input validation / sanitization on all server endpoints
+- [ ] Consider Android App Bundles for distribution
 
