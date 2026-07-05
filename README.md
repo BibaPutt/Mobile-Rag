@@ -6,6 +6,7 @@ MediAgent is an enterprise-grade, privacy-centric, and robust Android applicatio
 This document provides an exhaustive, highly technical deep dive into the architecture, mathematical formulations, database schemas, and background synchronization lifecycles that power MediAgent.
 
 ## Overview of the Written Documentation:
+
 ### High-Level System Architecture
 - Outlines the **MVVM architecture**, illustrating how state synchronization flows unidirectionally from the data layer through the ViewModel to the **Jetpack Compose** UI.
 
@@ -63,7 +64,7 @@ This document provides an exhaustive, highly technical deep dive into the archit
 3. [Background Document Ingestion & On-Device OCR Pipeline](#3-background-document-ingested--on-device-ocr-pipeline)
 4. [Hybrid Dense-Sparse RAG & Semantic Vector Space Search](#4-hybrid-dense-sparse-rag--semantic-vector-space-search)
 5. [Clinical Inference, Prompts & Safety Guardrails](#5-clinical-inference-prompts--safety-guardrails)
-6. [Interactive State Management & MVVM Layer](#6-interactive-state-management--mvvm-layer)
+6. [Multi-Provider Fallback Architecture](#6-multi-provider-fallback-architecture)
 7. [Asynchronous Lifecycles & OS Power Management](#7-asynchronous-lifecycles--os-power-management)
 
 ---
@@ -356,47 +357,191 @@ Patient identifying details (such as names, dates of birth, or addresses) are sc
 
 ---
 
-## 6. Interactive State Management & MVVM Layer
+## 6. Multi-Provider Fallback Architecture
 
-The presentation layer is fully written in **Jetpack Compose (Material 3)**. It implements custom adaptive designs and touch safety grids ($48\text{dp}$).
+MediAgent utilizes a decoupled, resilient inference and embedding layer capable of coordinating with multiple remote cloud APIs (Google Gemini, OpenAI GPT) while maintaining a strict, non-blocking on-device local heuristic backup engine.
 
-### Category Long-Press Deletion Workflow
-In the document management screen, clinicians organize reference manuals into dynamic tag categories.
-When a custom category is long-pressed inside the manager dialogue, it triggers a cascade deletion query:
-```kotlin
-// UI Composable (Jetpack Compose)
-Card(
-    modifier = Modifier.combinedClickable(
-        onClick = { tempName = catName },
-        onLongClick = {
-            categoryToDelete = catName
-            showDeleteConfirm = true
-        }
-    )
-) { /* Card contents */ }
 ```
-When approved, the viewmodel executes `removeCategoryTag`:
-1. Saves the deleted identifier to SharedPreferences (`removed_categories`). This hides the preset option from future selections.
-2. Runs a background Room query to clear category fields across all associated `DocItem` guidelines, resetting them safely to an uncategorized state.
-```kotlin
-fun removeCategoryTag(categoryName: String) {
-    viewModelScope.launch(Dispatchers.IO) {
-        val prefs = getApplication<Application>().getSharedPreferences("mediagent_prefs", Context.MODE_PRIVATE)
-        val currentSet = prefs.getStringSet("removed_categories", emptySet()) ?: emptySet()
-        val newSet = currentSet.toMutableSet().apply { add(categoryName) }
-        prefs.edit().putStringSet("removed_categories", newSet).apply()
-        _removedCategories.value = newSet
+                  ┌──────────────────────────────────────────┐
+                  │          MediAgent ViewModel             │
+                  └────────────────────┬─────────────────────┘
+                                       │
+                     Transcripts & Consultation Context
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │       Agent Intelligence Coordinator      │
+                  └────────────────────┬─────────────────────┘
+                                       │
+              ┌────────────────────────┼────────────────────────┐
+              │                        │                        │
+       [Primary Channel]       [Secondary Channel]      [Local Failure Fallback]
+              │                        │                        │
+              ▼                        ▼                        ▼
+     Google Gemini REST       OpenAI Custom REST      On-Device Rule Matcher
+    (Gemini-1.5-Pro / Flash)  (GPT-4o / GPT-4o-Mini)   & Heuristic Scorer
+              │                        │                        │
+              └────────────────────────┼────────────────────────┘
+                                       │
+                                       ▼
+                  ┌──────────────────────────────────────────┐
+                  │      Structured Clinical Formulation     │
+                  │       (Citations & Grounded Outputs)     │
+                  └──────────────────────────────────────────┘
+```
 
-        val allDocs = repository.getAllDocumentsRaw()
-        allDocs.forEach { doc ->
-            if (doc.categoryName.equals(categoryName, ignoreCase = true)) {
-                val updatedDoc = doc.copy(categoryName = "", categoryColor = "")
-                repository.insertDocument(updatedDoc)
-            }
-        }
-    }
+### 6.0.1 Large Language Model (LLM) Integration Matrix
+
+*   **Primary Inference Tier**: Targets Google Gemini endpoints using structured `generateContent` stream configurations. By default, it requests type-safe JSON schema formatting with hard constraints on JSON output structures.
+*   **Secondary Inference Tier**: Maps to OpenAI compatible endpoints (`v1/chat/completions`) using custom serializations for structured tool calling or JSON-mode specifications.
+*   **On-Device Heuristic Fallback**: Evaluated automatically if active network interfaces are offline, or if the server returns $5\text{xx}$ server exceptions. It targets a localized, rule-based inference pipeline using symptom match arrays and locally indexed medical lookups.
+
+### 6.0.2 Multi-Vendor Embedding Space Coordinates
+
+To represent medical guideline documents, books, and transcripts, MediAgent supports dynamic coordinate mapping over multiple vector schemas:
+
+| Provider | Model Target | Output Dimensions ($d$) | Metric Space | Primary Purpose |
+| :--- | :--- | :--- | :--- | :--- |
+| **Google Gemini** | `models/text-embedding-004` | $768$ | Cosine Similarity | Medical text segments, transcripts, guideline indices |
+| **OpenAI** | `text-embedding-3-small` | $1536$ | Cosine Similarity | Alternate cloud schema alignment |
+| **Local Sparse** | On-device bag-of-words / TF-IDF | Sparse | Jaccard / Overlap | Offline and network-restricted lookup fallback |
+
+---
+
+## 6.1. Dynamic Vector Retrieval Mechanics (Dense-Sparse RAG)
+
+The Retrieval-Augmented Generation (RAG) engine operates on a hybrid coordinate/lexical framework designed to search and filter indexed documents stored inside the local Room SQLite database.
+
+### 6.1.1 Mathematical Coordinate Matching (Dense Cosine Similarity)
+
+Given a query string representing transcribed symptoms, the system generates a query vector $\mathbf{q} \in \mathbb{R}^{d}$. Each candidate medical chunk stored in the `DocumentChunk` table is represented as $\mathbf{c}_i \in \mathbb{R}^{d}$. 
+
+The fundamental similarity metric ($S_{\text{dense}}$) represents the Cosine Similarity between the coordinate arrays:
+
+$$S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) = \frac{\mathbf{q} \cdot \mathbf{c}_i}{\|\mathbf{q}\| \|\mathbf{c}_i\|} = \frac{\sum_{k=1}^{d} q_k c_{i,k}}{\sqrt{\sum_{k=1}^{d} q_k^2} \sqrt{\sum_{k=1}^{d} c_{i,k}^2}}$$
+
+To prevent hallucinated context injection, a cosine similarity threshold is strictly applied:
+
+$$S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) \ge \tau \quad \text{where} \quad \tau = 0.25$$
+
+### 6.1.2 Sparse Multiplier & Semantic Boosting
+
+To optimize lookup accuracy for specific manuals (such as cardiology, pediatric references, or acupoint coordinates), the dense match score is combined with a sparse boosting algorithm:
+
+$$S_{\text{hybrid}}(\mathbf{q}, \mathbf{c}_i) = S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) + \delta_{\text{doc}} \cdot \mathbb{I}(\text{doc}_i \in \mathcal{D}_{\text{target}}) + \gamma_{\text{keyword}} \cdot \sum_{w \in \mathcal{K}} \mathbb{I}(w \in \mathbf{c}_i)$$
+
+Where:
+*   $\mathcal{D}_{\text{target}}$: Set of target reference manuals nominated as primary context boundaries by the system coordinator.
+*   $\mathbb{I}(\cdot)$: Standard Indicator Function.
+*   $\delta_{\text{doc}}$: Additive target document bonus weight, set to $0.35$.
+*   $\mathcal{K}$: Set of extracted clinical keyword tokens (e.g., `"arrhythmia"`, `"myocardial"`, `"points"`).
+*   $\gamma_{\text{keyword}}$: Overlap weight multiplier applied per matched keyword, set to $0.05$.
+
+---
+
+## 6.2. Dynamic Tooling & Visual Grounding (Acupoint & Figure Cross-Referencing)
+
+An advanced feature of MediAgent is its ability to ground structured text recommendations with real-time visual assets, clinical charts, and anatomical diagrams stored locally.
+
+```
+       [LLM Consultation Suggestion]
+                     │
+                     ▼  (Extract Title & Description)
+       ┌──────────────────────────────┐
+       │ Acupoint / Figure Extractor  │
+       └──────────────┬───────────────┘
+                      │
+          (Pattern Recognized?)
+         /                     \
+       YES                      NO
+       /                          \
+      ▼                            ▼
+ [Acupoint Channel Normalizer]   [Page-Window Search (PageIndex ±1)]
+      │                            │
+      ▼                            ▼
+ [Intersection Search on All Chunks] [Direct Image File Lookups]
+      │                            │
+      └──────────────┬─────────────┘
+                     │
+                     ▼
+       ┌──────────────────────────────┐
+       │ Render Referenced Diagrams   │
+       │ on Clinical Dashboard Canvas │
+       └──────────────────────────────┘
+```
+
+### 6.2.1 Standardized Acupoint Mapping Regex
+
+When recommendations include therapeutic guidelines referencing Meridian and Acupuncture points, the extraction pipeline isolates and maps targets using an intensive regex parser. It recognizes standard alphanumeric clinical nomenclature across all major meridians (e.g., LU-9, GV-20, ST-36):
+
+$$\text{Regex} = \text{\texttt{\textbackslash b(LU|LI|ST|SP|HT|SI|BL|KI|KID|PC|TE|SJ|GB|LR|LIV|CV|GV|DU|RN)\textbackslash s*[-\_]?\textbackslash s*([1-9]\textbackslash d?)\textbackslash b}}$$
+
+Matches are normalized to a consistent clinical format (e.g., `"LIV-3"` maps to `"LR-3"`, `"KID-1"` to `"KI-1"`) using standard lookups:
+```kotlin
+fun normalizeAcupoint(raw: String): String {
+    val clean = raw.uppercase().replace(Regex("[\\s-_]"), "")
+    if (clean.startsWith("LIV")) return "LR" + clean.substring(3)
+    if (clean.startsWith("KID")) return "KI" + clean.substring(3)
+    if (clean.startsWith("TE") || clean.startsWith("SJ")) return "TE" + clean.substring(2)
+    return clean
 }
 ```
+
+### 6.2.2 Visual Retrieval Cascades
+
+Once clinical suggestions or acupoints are successfully identified in the LLM's response, the engine initiates a three-layered retrieval cascade:
+
+#### Phase 1: Direct Acupoint Intersection
+The system searches the database for `DocumentChunk` elements containing matching acupoints, regardless of document origin, and retrieves associated image paths:
+```kotlin
+val acupointMatchedChunks = targetDocs.filter { chunk ->
+    val chunkPoints = acupointRegexForExtraction.findAll(chunk.chunkText)
+        .map { normalizeAcupoint(it.value) }.toSet()
+    chunkPoints.intersect(solAcupoints).isNotEmpty()
+}
+```
+
+#### Phase 2: Page-Window Search
+If the solution references a source page (e.g., page 42), the system executes a regional search on neighboring pages (indexes $P_{t-1} \le P \le P_{t+1}$) to extract relevant clinical diagrams or anatomical charts:
+```kotlin
+val pageWindowChunks = targetDocs.filter { chunk ->
+    kotlin.math.abs(chunk.pageIndex - sourcePage) <= 1
+}
+```
+
+#### Phase 3: Figure Cross-Referencing
+If a chunk contains text referencing specific figures (e.g., `"See Figure 3"`), a relational analyzer scans other chunks in the same book to pull images associated with `"Figure 3"` and mounts them to the active viewport:
+```kotlin
+val figureRegex = Regex("""\b(?:Figure|Fig\.|Fig|Diagram|Diag\.)\s*(\d+(?:\.\d+)?)\b""", RegexOption.IGNORE_CASE)
+```
+
+---
+
+## 6.3. Grounded Prompt Engine & Defense Layer
+
+To ensure clinical safety and maintain strict boundaries, the core generation pipeline leverages detailed system instructions combined with an active defense layer.
+
+```
+       [Raw Transcript Input] ──► [Input Validator]
+                                        │
+                             (Prompt Injection Detected?)
+                            /                            \
+                          YES                             NO
+                          /                                \
+                         ▼                                  ▼
+          [Sanitize Input Arguments]            [Construct Grounded Context]
+          - Scrub System Keywords                - Assemble Patient Context
+          - Force In-Context Auditing            - Append Cosine Vector Chunks
+                         │                                  │
+                         └────────────────┬─────────────────┘
+                                          │
+                                          ▼
+                         [Grounded AI Clinical Engine]
+                                          │
+                                          ▼
+                         [Strict JSON Output Schema]
+```
+
 
 ---
 
