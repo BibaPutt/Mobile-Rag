@@ -61,7 +61,7 @@ This document provides an exhaustive, highly technical deep dive into the archit
 ## Table of Contents
 1. [High-Level System Architecture](#1-high-level-system-architecture)
 2. [Data Layer & Room Schema Specification](#2-data-layer--room-schema-specification)
-3. [Background Document Ingestion & On-Device OCR Pipeline](#3-background-document-ingested--on-device-ocr-pipeline)
+3. [Background Document Ingestion & On-Device OCR Pipeline](#3-background-document-ingestion--on-device-ocr-pipeline)
 4. [Hybrid Dense-Sparse RAG & Semantic Vector Space Search](#4-hybrid-dense-sparse-rag--semantic-vector-space-search)
 5. [Clinical Inference, Prompts & Safety Guardrails](#5-clinical-inference-prompts--safety-guardrails)
 6. [Multi-Provider Fallback Architecture](#6-multi-provider-fallback-architecture)
@@ -337,7 +337,7 @@ $retrievedContext
 2. For each option in 'solutions', ensure it is purely grounded within its respective category resources. Do not intermingle clinical instructions of separate categories into a single option. You must explicitly organize solutions based on their respective guideline book categories.
 
 *** STRICT GROUNDING DIRECTIVES (FORCE EMPTINESS) ***
-* FORCE EMPTINESS: If the RAG retrieved chunks are empty, do not contain matching guidelines, or say "No relevant document guidelines available in local RAG", you MUST set the 'solutions' list to [] and set 'session_notes' to exactly: "your documents doesnt have the relateddocuments".
+* FORCE EMPTINESS: If the RAG retrieved chunks are empty, do not contain matching guidelines, or say "No relevant document guidelines available in local RAG", you MUST set the 'solutions' list to [] and set 'session_notes' to exactly: "your documents don't have the related documents".
 * Never cite documents or pages outside of the retrieved_chunks context.
 """
 ```
@@ -408,36 +408,6 @@ To represent medical guideline documents, books, and transcripts, MediAgent supp
 
 ---
 
-## 6.1. Dynamic Vector Retrieval Mechanics (Dense-Sparse RAG)
-
-The Retrieval-Augmented Generation (RAG) engine operates on a hybrid coordinate/lexical framework designed to search and filter indexed documents stored inside the local Room SQLite database.
-
-### 6.1.1 Mathematical Coordinate Matching (Dense Cosine Similarity)
-
-Given a query string representing transcribed symptoms, the system generates a query vector $\mathbf{q} \in \mathbb{R}^{d}$. Each candidate medical chunk stored in the `DocumentChunk` table is represented as $\mathbf{c}_i \in \mathbb{R}^{d}$. 
-
-The fundamental similarity metric ($S_{\text{dense}}$) represents the Cosine Similarity between the coordinate arrays:
-
-$$S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) = \frac{\mathbf{q} \cdot \mathbf{c}_i}{\|\mathbf{q}\| \|\mathbf{c}_i\|} = \frac{\sum_{k=1}^{d} q_k c_{i,k}}{\sqrt{\sum_{k=1}^{d} q_k^2} \sqrt{\sum_{k=1}^{d} c_{i,k}^2}}$$
-
-To prevent hallucinated context injection, a cosine similarity threshold is strictly applied:
-
-$$S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) \ge \tau \quad \text{where} \quad \tau = 0.25$$
-
-### 6.1.2 Sparse Multiplier & Semantic Boosting
-
-To optimize lookup accuracy for specific manuals (such as cardiology, pediatric references, or acupoint coordinates), the dense match score is combined with a sparse boosting algorithm:
-
-$$S_{\text{hybrid}}(\mathbf{q}, \mathbf{c}_i) = S_{\text{dense}}(\mathbf{q}, \mathbf{c}_i) + \delta_{\text{doc}} \cdot \mathbb{I}(\text{doc}_i \in \mathcal{D}_{\text{target}}) + \gamma_{\text{keyword}} \cdot \sum_{w \in \mathcal{K}} \mathbb{I}(w \in \mathbf{c}_i)$$
-
-Where:
-*   $\mathcal{D}_{\text{target}}$: Set of target reference manuals nominated as primary context boundaries by the system coordinator.
-*   $\mathbb{I}(\cdot)$: Standard Indicator Function.
-*   $\delta_{\text{doc}}$: Additive target document bonus weight, set to $0.35$.
-*   $\mathcal{K}$: Set of extracted clinical keyword tokens (e.g., `"arrhythmia"`, `"myocardial"`, `"points"`).
-*   $\gamma_{\text{keyword}}$: Overlap weight multiplier applied per matched keyword, set to $0.05$.
-
----
 
 ## 6.2. Dynamic Tooling & Visual Grounding (Acupoint & Figure Cross-Referencing)
 
