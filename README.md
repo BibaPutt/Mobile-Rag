@@ -6,7 +6,7 @@ MediAgent is an enterprise-grade, privacy-centric, and robust Android applicatio
 This document provides an exhaustive, highly technical deep dive into the architecture, mathematical formulations, database schemas, and background synchronization lifecycles that power MediAgent.
 
 ## Overview of the Written Documentation:
-**High-Level System Architecture**Outlines the MVVM architecture mapping, detailing how state synchronization flows unidirectionally from the data model layer up to Jetpack Compose UI.
+**High-Level System Architecture:**Outlines the MVVM architecture mapping, detailing how state synchronization flows unidirectionally from the data model layer up to Jetpack Compose UI.
 **Data Layer & Room Schema:**Includes a custom text-based entity relationship diagram illustrating foreign keys, cascade constraints, and structural columns for Patient, Session, SessionTurn, DocItem, and DocumentChunk.
 **On-Device OCR & Text Extraction Pipeline:**Documents the native use of android.graphics.pdf.PdfRenderer to unpack pages, convert unscanned documents into bitmaps, and execute on-device Google ML Kit Text Recognition (OCR).
 Highlights the rolling sliding-window chunkText algorithm and concurrent batch embedding request dispatching.
@@ -22,6 +22,55 @@ Describes the Jetpack Compose interactive workflows, including long-pressing cat
 **Lifecycles & Power Management:**
 Details background persistence mechanics utilizing active WakeLocks and WifiLocks alongside real-time ETA progress calculations inside an Android ForegroundService.
 
+### High-Level System Architecture
+- Outlines the **MVVM architecture**, illustrating how state synchronization flows unidirectionally from the data layer through the ViewModel to the **Jetpack Compose** UI.
+
+### Data Layer & Room Database Schema
+- Includes a custom text-based **Entity Relationship Diagram (ERD)**.
+- Illustrates:
+  - Foreign key relationships
+  - Cascade delete constraints
+  - Database structures for:
+    - `Patient`
+    - `Session`
+    - `SessionTurn`
+    - `DocItem`
+    - `DocumentChunk`
+
+### On-Device OCR & Text Extraction Pipeline
+- Documents the native use of `android.graphics.pdf.PdfRenderer` to:
+  - Render PDF pages.
+  - Convert scanned or image-based documents into bitmaps.
+  - Perform fully on-device OCR using **Google ML Kit Text Recognition**.
+- Explains the rolling **sliding-window `chunkText` algorithm** used for document segmentation.
+- Describes concurrent batch embedding request dispatching for efficient vector generation.
+
+### Hybrid Dense–Sparse RAG Search Mechanics
+- Presents the mathematical formulation for **Cosine Similarity** used during dense semantic retrieval.
+- Explains the hybrid sparse ranking strategy, including:
+  - Target document boosting.
+  - Keyword matching boosts.
+- Demonstrates how additive weighting improves retrieval relevance.
+- Details the contextual diversity allocation algorithm (`distributeChunksEqually`), preventing retrieval results from being monopolized by a single document source.
+
+### Clinical Inference Guardrails
+- Documents the prompt injection defense mechanism that distinguishes malicious instruction-override attempts from legitimate clinical terminology (e.g., *"dimpling"* and *"emergency signs"*).
+- Explains the **Force Emptiness Protocol**, which returns:
+  > "Your documents don't contain related information."
+  when no relevant local clinical context is available.
+
+### State Cascading Operations
+- Describes Jetpack Compose interaction workflows, including:
+  - Long-press actions on category tags.
+  - Automatic cascade deletion across related Room database entities.
+  - Consistent UI state synchronization following database updates.
+
+### Lifecycle & Power Management
+- Details background processing and persistence mechanisms utilizing:
+  - `WakeLock`
+  - `WifiLock`
+  - Android `ForegroundService`
+- Explains real-time ETA estimation and progress reporting during long-running document processing tasks.
 ---
 
 ## Table of Contents
