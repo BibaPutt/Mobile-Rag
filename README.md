@@ -6,22 +6,6 @@ MediAgent is an enterprise-grade, privacy-centric, and robust Android applicatio
 This document provides an exhaustive, highly technical deep dive into the architecture, mathematical formulations, database schemas, and background synchronization lifecycles that power MediAgent.
 
 ## Overview of the Written Documentation:
-**High-Level System Architecture:**Outlines the MVVM architecture mapping, detailing how state synchronization flows unidirectionally from the data model layer up to Jetpack Compose UI.
-**Data Layer & Room Schema:**Includes a custom text-based entity relationship diagram illustrating foreign keys, cascade constraints, and structural columns for Patient, Session, SessionTurn, DocItem, and DocumentChunk.
-**On-Device OCR & Text Extraction Pipeline:**Documents the native use of android.graphics.pdf.PdfRenderer to unpack pages, convert unscanned documents into bitmaps, and execute on-device Google ML Kit Text Recognition (OCR).
-Highlights the rolling sliding-window chunkText algorithm and concurrent batch embedding request dispatching.
-**Hybrid Dense-Sparse RAG Search Mechanics:**Includes the formal mathematical formula for Cosine Similarity:
-Explains the hybrid sparse boosting formula, illustrating how additive weights (target document boost 
- and keyword boost 
-) prioritize relevant chunks.
-Details the contextual diversity allocation method (distributeChunksEqually) preventing single-source monopolization.
-**Clinical Inference Guardrails:**Documents the prompt injection defense distinguishing malicious override keywords from critical clinical symptom descriptors (e.g., "dimpling", "emergency signs").
-Covers the Force Emptiness Protocol mapping to "your documents doesnt have the relateddocuments" when local context guidelines are missing.
-State Cascading Operations:
-Describes the Jetpack Compose interactive workflows, including long-pressing category tags to trigger cascade removals across database document models.
-**Lifecycles & Power Management:**
-Details background persistence mechanics utilizing active WakeLocks and WifiLocks alongside real-time ETA progress calculations inside an Android ForegroundService.
-
 ### High-Level System Architecture
 - Outlines the **MVVM architecture**, illustrating how state synchronization flows unidirectionally from the data layer through the ViewModel to the **Jetpack Compose** UI.
 
